@@ -63,10 +63,80 @@ async function handleRequest(details) {
     });
 }
 
+let popupPort = null;
+
+chrome.runtime.onConnect.addListener(port => {
+    switch (port.name) {
+    case 'popup':
+        popupPort = port;
+        port.onDisconnect.addListener(() => {
+            popupPort = null;
+        });
+        break;
+    }
+});
+
 chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     if (req.type === 'getVideosForTab' && req.tabId !== -1) {
-        const videos = interceptedVideos[request.tabId] || [];
+        const videos = interceptedVideos[req.tabId] || [];
         sendResponse({ videos });
+        return false;
+    } else if (req.type === 'downloadVideo' && req.video) {
+        handleDownloadVideo(req.video).then(() => {
+            sendResponse({ success: true });
+        }).catch(err => {
+            console.error(err);
+            sendResponse({ success: false, error: err.message });
+        });
+        return true;
     }
-    return true;
 });
+
+async function handleDownloadVideo(video) {
+    const segmentUrls = video.segmentUrls;
+    let completedSegments = 0;
+    let lastTimeReported = 0;
+    const concurrencyLimit = 4;
+    const queue = [...segmentUrls];
+
+    const reportProgress = force => {
+        const progress = 0.05 + 0.95 * (completedSegments / segmentUrls.length);
+        const shouldReport = !!force || (Date.now() - lastTimeReported >= 1000);
+        if (shouldReport && activePort) {
+            activePort.postMessage({ type: 'downloadStatus', progress });
+            lastTimeReported = Date.now();
+        }
+    };
+
+    async function* downloadQueue() {
+        while (queue.length > 0) {
+            const url = queue.shift();
+            yield fetch(url, { credentials: 'include' })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch segment: ${url}`);
+                    }
+                    return response.arrayBuffer();
+                })
+                .then(arrayBuffer => {
+                    completedSegments++;
+                    reportProgress();
+                    return arrayBuffer;
+                });
+        }
+    }
+
+    const workers = Array.from({ length: concurrencyLimit }, async () => {
+        const results = [];
+        for await (const arrayBuffer of downloadQueue()) {
+            results.push(arrayBuffer);
+        }
+        return results;
+    });
+
+    reportProgress(true);
+    const segmentArrayBuffers = (await Promise.all(workers)).flat();
+    reportProgress(true);
+
+    console.log(segmentArrayBuffers.length);
+}

@@ -21,6 +21,6 @@
         "default_title": "Substack Dl",
         "default_popup": "popup.html"
     },
-    "permissions": ["downloads", "webRequest", "activeTab"],
+    "permissions": ["downloads", "offscreen", "webRequest", "activeTab"],
     "host_permissions": ["<all_urls>"]
 }

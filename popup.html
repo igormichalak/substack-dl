@@ -7,6 +7,15 @@
             margin: 8px;
             width: 300px;
         }
+        #progress-bar {
+            position: fixed;
+            inset: 0 0 auto 0;
+            height: 4px;
+            background-color: rgb(240 67 36);
+            transform: scaleX(0);
+            transform-origin: left center;
+            transition: transform 200ms ease-out;
+        }
         .video-item {
             margin-bottom: 10px;
         }
@@ -19,6 +28,7 @@
     </style>
 </head>
 <body>
+    <div id="progress-bar"></div>
     <h3>Intercepted Videos</h3>
     <div id="videos-container"></div>
     <script src="popup.js"></script>
