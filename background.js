@@ -63,7 +63,19 @@ async function handleRequest(details) {
     });
 }
 
+const downloadedVideos = {};
+
+chrome.tabs.onRemoved.addListener(tabId => {
+    const associatedVideos = interceptedVideos[tabId];
+    if (associatedVideos) {
+        for (const video of associatedVideos) {
+            delete downloadedVideos[video.url];
+        }
+    }
+});
+
 let popupPort = null;
+let offscreenPort = null;
 
 chrome.runtime.onConnect.addListener(port => {
     switch (port.name) {
@@ -71,6 +83,19 @@ chrome.runtime.onConnect.addListener(port => {
         popupPort = port;
         port.onDisconnect.addListener(() => {
             popupPort = null;
+        });
+        break;
+    case 'offscreen':
+        offscreenPort = port;
+        port.onDisconnect.addListener(() => {
+            offscreenPort = null;
+        });
+        port.onMessage.addListener(req => {
+            if (req.type === 'videoReady' && req.downloadUrl) {
+                downloadedVideos[req.videoUrl] = req.downloadUrl;
+            } else if (req.type === 'downloadStatus' && popupPort) {
+                popupPort.postMessage(req);
+            }
         });
         break;
     }
@@ -93,50 +118,43 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
 });
 
 async function handleDownloadVideo(video) {
-    const segmentUrls = video.segmentUrls;
-    let completedSegments = 0;
-    let lastTimeReported = 0;
-    const concurrencyLimit = 4;
-    const queue = [...segmentUrls];
-
-    const reportProgress = force => {
-        const progress = 0.05 + 0.95 * (completedSegments / segmentUrls.length);
-        const shouldReport = !!force || (Date.now() - lastTimeReported >= 1000);
-        if (shouldReport && activePort) {
-            activePort.postMessage({ type: 'downloadStatus', progress });
-            lastTimeReported = Date.now();
-        }
-    };
-
-    async function* downloadQueue() {
-        while (queue.length > 0) {
-            const url = queue.shift();
-            yield fetch(url, { credentials: 'include' })
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`Failed to fetch segment: ${url}`);
-                    }
-                    return response.arrayBuffer();
-                })
-                .then(arrayBuffer => {
-                    completedSegments++;
-                    reportProgress();
-                    return arrayBuffer;
-                });
-        }
-    }
-
-    const workers = Array.from({ length: concurrencyLimit }, async () => {
-        const results = [];
-        for await (const arrayBuffer of downloadQueue()) {
-            results.push(arrayBuffer);
-        }
-        return results;
+    chrome.offscreen.createDocument({
+        url: 'offscreen.html',
+        reasons: ['BLOBS'],
+        justification: 'download and combine all the video segments',
     });
 
-    reportProgress(true);
-    const segmentArrayBuffers = (await Promise.all(workers)).flat();
-    reportProgress(true);
+    await new Promise(resolve => {
+        const intervalId = setInterval(() => {
+            if (offscreenPort) {
+                clearInterval(intervalId);
+                resolve();
+            }
+        }, 100);
+    });
 
-    console.log(segmentArrayBuffers.length);
+    offscreenPort.postMessage({
+        type: 'processSegments',
+        videoUrl: video.url,
+        segmentUrls: video.segmentUrls,
+    });
+
+    await new Promise(resolve => {
+        const intervalId = setInterval(() => {
+            if (downloadedVideos[video.url]) {
+                clearInterval(intervalId);
+                resolve();
+            }
+        }, 100);
+    });
+
+    chrome.downloads.download({
+        url: downloadedVideos[video.url],
+        filename: `video_${Date.now()}.ts`,
+        saveAs: true,
+    }, () => {
+        setTimeout(() => {
+            chrome.offscreen.closeDocument();
+        }, 60000);
+    });
 }
